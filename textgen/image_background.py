@@ -1,4 +1,5 @@
-from PIL import Image, ImageDraw, ImageFilter
+from wand.image import Image
+
 import shapely
 from shapely.geometry import Point, LineString
 from shapely.geometry.polygon import Polygon
@@ -27,7 +28,7 @@ class ImageBackgroundOptions(object):
             for line in f:
                 cols = line.strip().split(',')
                 attrs = json.loads(','.join(cols[5:-1]).replace('""', '"').strip('"'))
-                img = Image.open(os.path.join(self.image_dir, cols[0]))
+                img = cv2.imread(os.path.join(self.image_dir, cols[0]), cv2.IMREAD_COLOR)
                 pts = list(zip(map(int, attrs['all_points_x']), map(int, attrs['all_points_y'])))
 
                 self.background_images.append((img, pts))
@@ -73,19 +74,19 @@ def generate_image_background(opts, index, generate_text):
     # when finding our box
     print('Generating inital text...')
     text_image, _ = generate_text((255, 255, 255), 80)
-    aspect_ratio = text_image.size[1] / text_image.size[0]
+    aspect_ratio = text_image.shape[0] / text_image.shape[1]
 
     img, pts = opts.background_images[index % len(opts.background_images)]
 
     # Compute the average background color of the polygon
     print('Getting background color...')
-    poly_mask = np.zeros((img.size[1], img.size[0]), dtype=np.uint8)
+    poly_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
     cv2.fillConvexPoly(poly_mask, np.array(pts, np.int32), 255)
     np_poly_mask = np.where(poly_mask == 255)
     bg_color = (
-        np.mean(np.asarray(img)[:, :, 0][np_poly_mask]),
-        np.mean(np.asarray(img)[:, :, 1][np_poly_mask]),
-        np.mean(np.asarray(img)[:, :, 2][np_poly_mask])
+        np.mean(img[:, :, 0][np_poly_mask]),
+        np.mean(img[:, :, 1][np_poly_mask]),
+        np.mean(img[:, :, 2][np_poly_mask])
     )
 
     poly = Polygon(shell=pts)
@@ -98,11 +99,10 @@ def generate_image_background(opts, index, generate_text):
         if poly.contains(new_center):
             centers.append(new_center)
 
-    background_image = img.copy()
-    draw = ImageDraw.Draw(background_image)
-    draw.polygon(pts, outline=(255, 0, 0))
+    alpha_channel = 255 * np.ones((img.shape[0], img.shape[1], 1), dtype=np.uint8)
+    background_image = np.concatenate((img, alpha_channel), axis=2)
 
-    background_mask = Image.new("RGB", background_image.size, (0, 0, 0))
+    background_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
 
     print('Finding best fit rectangle...')
     rect_params = None
@@ -115,7 +115,7 @@ def generate_image_background(opts, index, generate_text):
 
             # Create x and y lines from our chosen center and skew angle. The lines should run to infinity in both directions
             # but that can't be coded. Instead we run them the image width in both directions which is equivalent
-            x_line, y_line = project_axes(center, theta, img.size[0], img.size[1])
+            x_line, y_line = project_axes(center, theta, img.shape[1], img.shape[0])
 
             # Compute the new centers. The rational is that these are more central to the polygon and should be better
             # centroids for our rectangle
@@ -126,7 +126,7 @@ def generate_image_background(opts, index, generate_text):
 
             # Iterate over our centers and try different widths at our fixed aspect ratio
             for center in new_centers:
-                x_line, y_line = project_axes(center, theta, img.size[0], img.size[1])
+                x_line, y_line = project_axes(center, theta, img.shape[1], img.shape[0])
 
                 try:
                     width = LineString(poly.intersection(x_line).coords).length
@@ -153,13 +153,27 @@ def generate_image_background(opts, index, generate_text):
         return None, None
 
     print('Merging sample...')
-    rotated_image = text_image.rotate(-1 * theta, expand=1)
-    rotated_mask = text_mask.rotate(-1 * theta, expand=1)
+    with Image.from_array(text_image, channel_map="rgba") as canvas:
+        canvas.rotate(theta)
+        rotated_image = np.array(canvas)
 
-    tl = (int(center.x - (rotated_image.size[0] / 2)), int(center.y - (rotated_image.size[1] / 2)))
+    with Image.from_array(text_mask, channel_map="i") as canvas:
+        canvas.rotate(theta)
+        rotated_mask = np.array(canvas)
 
-    background_image.paste(rotated_image, tl, rotated_image)
-    background_mask.paste(rotated_mask, tl)
+    tl = (int(center.x - (rotated_image.shape[1] / 2)), int(center.y - (rotated_image.shape[0] / 2)))
 
-    draw.polygon(list(best_rect.exterior.coords), outline=(0, 255, 0))
+    with Image.from_array(background_image, channel_map="rgba") as background_canvas:
+        with Image.from_array(rotated_image, channel_map="rgba") as text_canvas:
+            background_canvas.composite(text_canvas, tl[0], tl[1])
+            background_image = np.array(background_canvas)
+
+    with Image.from_array(background_mask, channel_map="i") as background_canvas:
+        with Image.from_array(rotated_mask, channel_map="i") as text_canvas:
+            background_canvas.composite(text_canvas, tl[0], tl[1])
+            background_mask = np.array(background_canvas)
+
+    # Remove alpha channel from background image
+    background_image = background_image[:, :, :3]
+
     return background_image, background_mask

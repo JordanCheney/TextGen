@@ -12,7 +12,7 @@ class SampleIterator:
         source,
         gen_opts,
         background_opts,
-        count
+        count,
    ):
         self.source = source
         self.gen_opts = gen_opts

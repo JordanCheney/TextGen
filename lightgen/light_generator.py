@@ -2,7 +2,6 @@ import subprocess
 import tempfile
 import cv2
 import numpy as np
-from PIL import Image
 
 pov_no_light = '''
 #include "colors.inc"
@@ -58,13 +57,18 @@ def add_lighting(image):
     if subprocess.call(["povray", "-h"], stdout=subprocess.PIPE, stderr=subprocess.PIPE) != 0:
         raise ValueError("Could not find the povray program on your path. Install povray and try again")
 
-    w, h = image.size
+    w, h = image.shape[1], image.shape[0]
     size = max(w, h)
-    square = Image.new('RGB', (size, size), (0, 0, 0))
-    square.paste(image, ((size - w) // 2, (size - h) // 2))
-    imgfile = tempfile.NamedTemporaryFile(suffix='.png', mode='w+')
-    square.save(imgfile.name)
+    x = (size - w) // 2
+    y = (size - h) // 2
 
+    square = np.zeros((size, size, 3), dtype=np.uint8)
+    square[y:y+h, x:x+w, :] = image
+    imgfile = tempfile.NamedTemporaryFile(suffix='.png', mode='w+')
+    cv2.imwrite(imgfile.name, square)
+
+    # Generate an initial rendering without lighting so we can compute image bounds with a
+    # threshold
     with tempfile.NamedTemporaryFile(suffix='.pov', mode='w+') as povfile:
         povfile.write(pov_no_light % (imgfile.name))
         povfile.flush()
@@ -79,6 +83,7 @@ def add_lighting(image):
         top = bounds[0].min()
         bottom = bounds[0].max()
 
+    # Now generate the real output
     with tempfile.NamedTemporaryFile(suffix='.pov', mode='w+') as povfile:
         povfile.write(pov_light % (
             0.6 * np.random.random() + 0.2, # light x-location
@@ -95,4 +100,4 @@ def add_lighting(image):
 
     povimg = cv2.imread(povfile.name[:-4] + '.png', cv2.IMREAD_COLOR)
 
-    return cv2.cvtColor(povimg[top:bottom, :, :], cv2.COLOR_BGR2RGB)
+    return povimg[top:bottom, :, :]
